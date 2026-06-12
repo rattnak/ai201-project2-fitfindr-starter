@@ -1,9 +1,15 @@
 # FitFindr — planning.md
 
-> Complete this document before writing any implementation code.
+<!-- > Complete this document before writing any implementation code.
 > Your spec and agent diagram are what you'll use to direct AI tools (Claude, Copilot, etc.) to generate your implementation — the more specific they are, the more useful the generated code will be.
 > Your planning.md will be reviewed as part of your submission.
-> Update it before starting any stretch features.
+> Update it before starting any stretch features. -->
+
+---
+
+## What FitFindr Does (2–3 sentence summary)
+
+FitFindr is a secondhand-shopping styling agent: given a natural-language request, it searches a mock listings dataset for matching thrift/resale pieces, picks the best one, suggests how to style that piece against the user's existing wardrobe, and then writes a short, shareable "fit card" caption for the find. The agent runs as a fixed three-step planning loop — `search_listings` → `suggest_outfit` → `create_fit_card` — passing state between steps through a single session dict. Each step has a guarded failure path: if `search_listings` returns no matches the loop stops immediately with a helpful "try this instead" message and never calls the styling tools with empty input; an empty wardrobe falls back to general styling advice rather than crashing.
 
 ---
 
@@ -15,74 +21,97 @@ You must have at least 3 tools. The three required tools are listed — add any 
 ### Tool 1: search_listings
 
 **What it does:**
-<!-- Describe what this tool does in 1–2 sentences -->
+Searches the 40-item mock listings dataset (`data/listings.json`, loaded via `load_listings()`) for items matching the user's keywords, then applies optional size and price filters and returns the matches ranked by keyword relevance. It is pure Python — no LLM call.
 
 **Input parameters:**
-<!-- List each parameter, its type, and what it represents -->
-- `description` (str): ...
-- `size` (str): ...
-- `max_price` (float): ...
+- `description` (str): free-text keywords describing what the user wants, e.g. `"vintage graphic tee"`. Each whitespace-separated word is treated as a keyword and matched (case-insensitively, substring) against each listing's `title`, `description`, `category`, and `style_tags`.
+- `size` (str | None): a size string to filter on, e.g. `"M"`. Matching is case-insensitive substring (`"m"` matches `"S/M"` and `"M/L"`). `None` skips size filtering.
+- `max_price` (float | None): inclusive maximum price. A listing passes if `listing["price"] <= max_price`. `None` skips price filtering.
 
 **What it returns:**
-<!-- Describe the return value — what fields does a result contain? -->
+A `list[dict]` of matching listing dicts, sorted by relevance score (highest first). Each dict carries all original listing fields: `id`, `title`, `description`, `category`, `style_tags` (list), `size`, `condition`, `price` (float), `colors` (list), `brand` (str | None), `platform`. Listings whose keyword-overlap score is 0 are dropped. Returns `[]` when nothing matches.
 
 **What happens if it fails or returns nothing:**
-<!-- What should the agent do if no listings match? -->
+It never raises — it returns `[]`. The planning loop detects the empty list, writes a specific, actionable message to `session["error"]` (telling the user to broaden keywords / raise the price / drop the size filter), and returns early **without** calling `suggest_outfit` or `create_fit_card`.
 
 ---
 
 ### Tool 2: suggest_outfit
 
 **What it does:**
-<!-- Describe what this tool does in 1–2 sentences -->
+Given the selected listing and the user's wardrobe, asks the LLM (Groq `llama-3.3-70b-versatile`) to propose 1–2 concrete outfits styling the new item with named pieces from the wardrobe, including a short note on how to wear it (tuck, roll, layer, etc.).
 
 **Input parameters:**
-<!-- List each parameter, its type, and what it represents -->
-- `new_item` (dict): ...
-- `wardrobe` (dict): ...
+- `new_item` (dict): the listing dict chosen by the planning loop (top search result). The tool reads its `title`, `category`, `colors`, `style_tags`, and `condition` into the prompt.
+- `wardrobe` (dict): a wardrobe dict shaped `{"items": [ {id, name, category, colors, style_tags, notes}, ... ]}`. May be empty (`items == []`) — handled explicitly.
 
 **What it returns:**
-<!-- Describe the return value -->
+A non-empty `str` of natural-language styling advice. With a populated wardrobe it names specific wardrobe pieces ("pair with your baggy straight-leg jeans and chunky white sneakers"). With an empty wardrobe it returns general styling advice (what silhouettes/colors/occasions the piece suits) instead of referencing nonexistent items.
 
 **What happens if it fails or returns nothing:**
-<!-- What should the agent do if the wardrobe is empty or no outfit can be suggested? -->
+If `wardrobe["items"]` is empty it switches to the general-advice prompt rather than failing. If the LLM call raises (network/API error) the tool catches the exception and returns a safe fallback string describing the item generically, so the loop can still proceed to `create_fit_card`. It never returns an empty string.
 
 ---
 
 ### Tool 3: create_fit_card
 
 **What it does:**
-<!-- Describe what this tool does in 1–2 sentences -->
+Turns the outfit suggestion and the new item into a short, casual, shareable social-media caption ("fit card") for the thrifted find. Uses the LLM at a higher temperature so repeated runs produce varied captions.
 
 **Input parameters:**
-<!-- List each parameter, its type, and what it represents -->
-- `outfit` (...): ...
+- `outfit` (str): the styling-advice string returned by `suggest_outfit()`. Used as the creative basis for the caption.
+- `new_item` (dict): the listing dict, so the caption can naturally mention the item `title`, `price`, and `platform` (each once).
 
 **What it returns:**
-<!-- Describe the return value -->
+A 2–4 sentence casual caption `str` suitable for Instagram/TikTok — first-person, authentic OOTD voice, mentioning item name, price, and platform once each, capturing the outfit vibe. Output varies across runs (temperature ≈ 0.9).
 
 **What happens if it fails or returns nothing:**
-<!-- What should the agent do if the outfit data is incomplete? -->
+If `outfit` is empty/whitespace-only, it returns a descriptive error-message string (e.g. `"Can't make a fit card — no outfit suggestion was provided."`) instead of raising. If the LLM call raises, it catches and returns a short fallback caption built from the item fields, so the UI always has something to show.
 
 ---
 
 ### Additional Tools (if any)
 
-<!-- Copy the block above for any tools beyond the required three -->
+None for the core build. (Stretch idea: a `parse_query` LLM tool to replace the regex parser in the loop — not implemented.)
 
 ---
 
 ## Planning Loop
 
 **How does your agent decide which tool to call next?**
-<!-- Describe the logic your planning loop uses. What does it look at? What conditions change its behavior? How does it know when it's done? -->
+
+The loop is a **fixed, conditional pipeline** driven by the contents of the session dict — not a free-form "LLM decides" loop. The sequence is always search → suggest → card, but it branches and can terminate early:
+
+1. **Parse.** Extract `description`, `size`, and `max_price` from the raw query with a lightweight regex/string parser (price from `under $30` / `$30` / `30 dollars`; size from a `size M` pattern or a standalone size token; description is the cleaned remaining text). Store in `session["parsed"]`.
+2. **Search.** Call `search_listings(description, size, max_price)`; store in `session["search_results"]`.
+   - **Branch (error):** `if not session["search_results"]:` set `session["error"]` to a helpful message and `return session` immediately. **Do not** call the styling tools. This is the visible error branch.
+   - **Branch (success):** `session["selected_item"] = session["search_results"][0]` (top-ranked match) and continue.
+3. **Suggest.** Call `suggest_outfit(session["selected_item"], session["wardrobe"])`; store in `session["outfit_suggestion"]`. (This tool internally branches on empty vs. populated wardrobe — the loop doesn't need to.)
+4. **Card.** Call `create_fit_card(session["outfit_suggestion"], session["selected_item"])`; store in `session["fit_card"]`.
+5. **Done.** `return session`. The caller checks `session["error"]` first; if `None`, the three result fields are populated.
+
+The loop "knows it's done" when it reaches step 5 (all three outputs set) **or** when the search branch terminates early with an error set. Behavior differs by input: an impossible query stops after step 2 with `fit_card is None`; a matchable query runs all three steps.
 
 ---
 
 ## State Management
 
 **How does information from one tool get passed to the next?**
-<!-- Describe how your agent stores and accesses state within a session. What data is tracked? How is it passed between tool calls? -->
+
+All state for one interaction lives in a single **session dict** created by `_new_session(query, wardrobe)` in `agent.py`. It is the single source of truth and is threaded through every step:
+
+| Key | Set by | Read by |
+|-----|--------|---------|
+| `query` | caller | parser (step 1) |
+| `parsed` | step 1 (parser) | step 2 (search args) |
+| `wardrobe` | caller | step 3 (`suggest_outfit`) |
+| `search_results` | step 2 | step 2 branch + step 4 selection |
+| `selected_item` | step 2 success branch | steps 3 & 4 |
+| `outfit_suggestion` | step 3 | step 4 |
+| `fit_card` | step 4 | UI |
+| `error` | step 2 error branch | caller / UI (checked first) |
+
+No globals and no re-prompting: each tool receives exactly what the previous step wrote into the session. The **exact same `selected_item` dict** written in step 2 is the object passed into both `suggest_outfit` and `create_fit_card`, so the find shown in the listing panel is provably the find that was styled and captioned. `run_agent()` returns the completed session; `handle_query()` in `app.py` maps its fields onto the three UI panels.
 
 ---
 
@@ -92,41 +121,53 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 | Tool | Failure mode | Agent response |
 |------|-------------|----------------|
-| search_listings | No results match the query | |
-| suggest_outfit | Wardrobe is empty | |
-| create_fit_card | Outfit input is missing or incomplete | |
+| search_listings | No results match the query | Loop sets `session["error"]` to: *"No listings matched '<query>'. Try broadening your keywords, raising your max price, or removing the size filter."* Returns early; `outfit_suggestion` and `fit_card` stay `None`. Never calls the styling tools on empty input. |
+| suggest_outfit | Wardrobe is empty (`items == []`) | Detects empty wardrobe and calls the LLM with a *general styling advice* prompt (silhouettes, colors, occasions, what to pair it with) instead of referencing nonexistent pieces. Returns a useful non-empty string so the loop continues. If the LLM call itself errors, returns a safe generic fallback string. |
+| create_fit_card | Outfit input is missing or incomplete | If `outfit` is empty/whitespace, returns a descriptive message string (*"Can't make a fit card — no outfit suggestion was provided."*) rather than raising. If the LLM call errors, returns a short fallback caption built from the item's title/price/platform. |
 
 ---
 
 ## Architecture
 
-<!-- Draw a diagram of your agent showing how the components connect:
-     User input → Planning Loop → Tools (search_listings, suggest_outfit, create_fit_card)
-                                                                          ↕
-                                                                   State / Session
-     Show what triggers each tool, how state flows between them, and where error paths branch off.
-     ASCII art, a Mermaid diagram (https://mermaid.js.org/syntax/flowchart.html), or an embedded
-     sketch are all fine. You'll share this diagram with an AI tool when asking it to implement
-     the planning loop and each individual tool. -->
+```mermaid
+flowchart TD
+    U([User query + wardrobe choice]) --> HQ["handle_query (app.py)"]
+    HQ -->|"run_agent(query, wardrobe)"| L["Planning Loop (agent.py)<br/>single session dict = state"]
+
+    L --> P["1. parse query<br/>session.parsed = {description, size, max_price}"]
+    P --> S["2. search_listings(description, size, max_price)<br/><i>pure Python</i>"]
+    DATA[("data/listings.json")] -.->|load_listings| S
+
+    S -->|"results == []"| E["session.error =<br/>'No listings matched... try broadening'"]
+    E --> R1([ERROR BRANCH: return session<br/>outfit_suggestion = None, fit_card = None])
+
+    S -->|"results = [item, ...]"| SEL["session.search_results = results<br/>session.selected_item = results[0]"]
+    SEL --> SO["3. suggest_outfit(selected_item, wardrobe)<br/>empty wardrobe → general advice"]
+    GROQ1[["Groq LLM"]] -.-> SO
+    SO --> OUT["session.outfit_suggestion = '...'"]
+
+    OUT --> CF["4. create_fit_card(outfit, selected_item)<br/>empty outfit → error string"]
+    GROQ2[["Groq LLM"]] -.-> CF
+    CF --> FC["session.fit_card = '...'"]
+    FC --> R2([return session])
+
+    R1 --> UI["handle_query maps session → 3 UI panels<br/>Top listing · Outfit idea · Fit card"]
+    R2 --> UI
+```
 
 ---
 
 ## AI Tool Plan
 
-<!-- For each part of the implementation below, describe:
-     - Which AI tool you plan to use (Claude, Copilot, ChatGPT, etc.)
-     - What you'll give it as input (which sections of this planning.md, your agent diagram)
-     - What you expect it to produce
-     - How you'll verify the output matches your spec before moving on
-
-     "I'll use AI to help me code" is not a plan.
-     "I'll give Claude my Tool 1 spec (inputs, return value, failure mode) and ask it to implement
-     search_listings() using load_listings() from the data loader — then test it against 3 queries
-     before trusting it" is a plan. -->
-
 **Milestone 3 — Individual tool implementations:**
 
+- **`search_listings`** — Tool: **Claude (Claude Code)**. Input: the Tool 1 block above (inputs, return value, failure mode) plus the `load_listings()` docstring from `utils/data_loader.py`. Expected output: a pure-Python function that filters by `max_price` and `size`, scores listings by keyword overlap against `title`/`description`/`category`/`style_tags`, drops zero-score listings, and returns sorted dicts. Verification before trusting: confirm it (a) filters on all three params, (b) returns `[]` (not an exception) for impossible queries, (c) every returned item respects the price cap. Then run the three pytest cases (results / empty / price filter).
+- **`suggest_outfit`** — Tool: **Claude**. Input: the Tool 2 block + the wardrobe schema (`data/wardrobe_schema.json`). Expected output: a function that branches on `wardrobe["items"]` empty vs. populated, builds the matching prompt, calls Groq `llama-3.3-70b-versatile`, and try/except-wraps the call. Verification: run once with `get_example_wardrobe()` (must name real wardrobe pieces) and once with `get_empty_wardrobe()` (must give general advice, non-empty, no crash).
+- **`create_fit_card`** — Tool: **Claude**. Input: the Tool 3 block. Expected output: a function guarding empty `outfit`, prompting for a casual caption at temperature ≈ 0.9, returning the string. Verification: empty-outfit input returns an error string (not an exception); same valid input run 3× yields varied captions (bump temperature if identical).
+
 **Milestone 4 — Planning loop and state management:**
+
+- Tool: **Claude**. Input: the **Architecture diagram** (ASCII + Mermaid) plus the **Planning Loop** and **State Management** sections above. Expected output: `run_agent()` that initializes the session via `_new_session()`, parses the query, calls `search_listings`, **branches on the empty result (early return with error set)**, selects `results[0]`, then calls `suggest_outfit` and `create_fit_card`, storing each result in the session. Verification before trusting: confirm it (a) branches on the search result rather than calling all three tools unconditionally, (b) writes every value into the session dict, (c) on the no-results query leaves `fit_card is None` and `error` set. Test with both the happy-path and the deliberate no-results query already in `agent.py`.
 
 ---
 
@@ -136,14 +177,14 @@ Write out what a full user interaction looks like from start to finish — tool 
 
 **Example user query:** "I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?"
 
-**Step 1:**
-<!-- What does the agent do first? Which tool is called? With what input? -->
+**Step 1 — Parse:** The loop parses the query into `session["parsed"] = {"description": "vintage graphic tee", "size": None, "max_price": 30.0}` (price extracted from "under $30"; no explicit size given).
 
-**Step 2:**
-<!-- What happens next? What was returned from step 1? What tool is called now? -->
+**Step 2 — Search:** Calls `search_listings("vintage graphic tee", size=None, max_price=30.0)`. Listings are scored by keyword overlap on "vintage/graphic/tee" and filtered to `price <= 30`. Matches include the Y2K Baby Tee ($18), the 2003 bootleg-style Graphic Tee ($24), and the Vintage Band Tee ($19). The list is non-empty, so `session["search_results"]` is set and `session["selected_item"]` is the top-ranked result (the strongest keyword match, e.g. the bootleg-style **Graphic Tee — $24, depop, good condition**). The error branch is skipped.
 
-**Step 3:**
-<!-- Continue until the full interaction is complete -->
+**Step 3 — Suggest outfit:** Calls `suggest_outfit(<selected graphic tee>, <example wardrobe>)`. The LLM sees the tee plus the user's real pieces and returns something like: *"Tuck the front of this faded graphic tee into your baggy straight-leg jeans and finish with the chunky white sneakers for an easy 90s streetwear fit. Layer the vintage black denim jacket on top when it's cooler."* Stored in `session["outfit_suggestion"]`.
 
-**Final output to user:**
-<!-- What does the user actually see at the end? -->
+**Step 4 — Fit card:** Calls `create_fit_card(<that suggestion>, <selected graphic tee>)`. The LLM returns a casual caption like: *"found this faded graphic tee on depop for $24 and it's already my most-worn 🖤 tucked into baggy jeans + chunky sneakers, threw the denim jacket over it. peak thrift luck."* Stored in `session["fit_card"]`.
+
+**Final output to user:** The Gradio UI shows three panels — **Top listing** (title, price, platform, condition, size of the selected tee), **Outfit idea** (the step-3 styling text), and **Your fit card** (the step-4 caption). `session["error"]` is `None`.
+
+**Error-path variant:** For the query *"designer ballgown size XXS under $5"*, step 2 returns `[]`. The loop sets `session["error"] = "No listings matched ... Try broadening your keywords, raising your max price, or removing the size filter."`, returns early, and the UI shows that message in the listing panel with the other two panels empty — `suggest_outfit` and `create_fit_card` are never called.
