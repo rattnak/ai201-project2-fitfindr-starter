@@ -131,8 +131,70 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    item_desc = (
+        f"{new_item.get('title', 'this piece')} "
+        f"(category: {new_item.get('category', 'unknown')}, "
+        f"colors: {', '.join(new_item.get('colors', [])) or 'n/a'}, "
+        f"style: {', '.join(new_item.get('style_tags', [])) or 'n/a'}, "
+        f"condition: {new_item.get('condition', 'n/a')})"
+    )
+
+    items = wardrobe.get("items", []) if wardrobe else []
+
+    if not items:
+        # Empty wardrobe: give general styling advice, do not invent pieces.
+        prompt = (
+            "You are a thoughtful personal stylist for secondhand fashion.\n"
+            f"A shopper is considering this thrifted item: {item_desc}.\n"
+            "They have NOT entered any wardrobe items yet.\n"
+            "Give general styling advice for this piece in 2-4 sentences: what "
+            "silhouettes, colors, and types of pieces pair well with it, and what "
+            "vibe or occasions it suits. Do not reference specific items they own, "
+            "since you don't know their wardrobe."
+        )
+    else:
+        wardrobe_lines = "\n".join(
+            f"- {it.get('name', 'item')} "
+            f"({it.get('category', '')}; {', '.join(it.get('colors', []))})"
+            + (f" — {it['notes']}" if it.get("notes") else "")
+            for it in items
+        )
+        prompt = (
+            "You are a thoughtful personal stylist for secondhand fashion.\n"
+            f"A shopper is considering this thrifted item: {item_desc}.\n\n"
+            "Here is their existing wardrobe:\n"
+            f"{wardrobe_lines}\n\n"
+            "Suggest 1-2 complete outfits that style the new item with SPECIFIC "
+            "pieces from their wardrobe (name the pieces). Keep it to 2-4 sentences "
+            "total. Include one concrete styling tip (e.g. tuck, roll, layer). "
+            "Be specific and practical, not generic."
+        )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=300,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        if text:
+            return text
+    except Exception as exc:  # network/API failure — degrade gracefully.
+        return (
+            f"Style {new_item.get('title', 'this piece')} as a versatile layering "
+            f"piece — lean into its {', '.join(new_item.get('style_tags', []) or ['vintage'])} "
+            f"feel and build the rest of the look around its colors. "
+            f"(Styling assistant was unavailable: {exc})"
+        )
+
+    # Fallback if the model returned an empty string.
+    return (
+        f"Style {new_item.get('title', 'this piece')} as a versatile staple — pair "
+        f"it with simple bottoms and let its {', '.join(new_item.get('colors', []) or ['neutral'])} "
+        f"tones lead the outfit."
+    )
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
