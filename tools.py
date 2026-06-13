@@ -226,5 +226,47 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    # Guard against missing/incomplete outfit input.
+    if not outfit or not outfit.strip():
+        return "Can't make a fit card — no outfit suggestion was provided."
+
+    title = new_item.get("title", "this thrifted find")
+    price = new_item.get("price")
+    price_str = f"${price:.0f}" if isinstance(price, (int, float)) else "a steal"
+    platform = new_item.get("platform", "secondhand")
+
+    prompt = (
+        "Write a short, casual social-media caption (an Instagram/TikTok 'fit card') "
+        "for a thrifted outfit. Voice: first-person, authentic OOTD energy, NOT a "
+        "product description. 2-4 sentences. Mention the item name, its price, and the "
+        "platform once each, woven in naturally. Capture the outfit's vibe in specific "
+        "terms. A tasteful emoji or two is fine.\n\n"
+        f"Item: {title}\n"
+        f"Price: {price_str}\n"
+        f"Platform: {platform}\n"
+        f"Outfit / styling: {outfit}\n\n"
+        "Caption:"
+    )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.9,  # high temperature → varied captions across runs
+            max_tokens=200,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        if text:
+            return text
+    except Exception as exc:  # network/API failure — degrade gracefully.
+        return (
+            f"scored this {title} on {platform} for {price_str} and it's instantly a "
+            f"favorite ✨ ({exc})"
+        )
+
+    # Fallback if the model returned an empty string.
+    return (
+        f"thrifted this {title} off {platform} for {price_str} and i'm obsessed — "
+        f"already planning the next fit around it ✨"
+    )
