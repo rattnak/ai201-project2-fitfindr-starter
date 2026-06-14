@@ -18,7 +18,78 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
+
+
+# ── query parsing ─────────────────────────────────────────────────────────────
+
+# Common clothing size tokens we recognize as a standalone "size" filter.
+_SIZE_TOKENS = {"xxs", "xs", "s", "m", "l", "xl", "xxl"}
+
+
+def _parse_query(query: str) -> dict:
+    """
+    Extract a search description, optional size, and optional max_price from a
+    natural-language query using lightweight regex/string rules (no LLM).
+
+    Returns a dict: {"description": str, "size": str | None, "max_price": float | None}
+
+    Examples:
+        "vintage graphic tee under $30, size M"
+            -> {"description": "vintage graphic tee", "size": "M", "max_price": 30.0}
+        "90s track jacket in size M"
+            -> {"description": "90s track jacket", "size": "M", "max_price": None}
+    """
+    text = query.strip()
+    working = text  # we strip matched fragments out so they don't pollute the description
+
+    # --- price: "under $30", "$30", "under 30 dollars", "below 25" ---
+    max_price = None
+    price_match = re.search(
+        r"(?:under|below|less than|max|up to)?\s*\$?\s*(\d+(?:\.\d+)?)\s*(?:dollars|usd|bucks)?",
+        working,
+        flags=re.IGNORECASE,
+    )
+    # Only treat a number as a price if it's near a price cue ($ / under / dollars).
+    price_cue = re.search(
+        r"(?:under|below|less than|max|up to|\$)\s*\$?\s*(\d+(?:\.\d+)?)|"
+        r"(\d+(?:\.\d+)?)\s*(?:dollars|usd|bucks)",
+        working,
+        flags=re.IGNORECASE,
+    )
+    if price_cue:
+        num = price_cue.group(1) or price_cue.group(2)
+        max_price = float(num)
+        working = re.sub(
+            r"(?:under|below|less than|max|up to)?\s*\$?\s*"
+            + re.escape(num)
+            + r"\s*(?:dollars|usd|bucks)?",
+            " ",
+            working,
+            flags=re.IGNORECASE,
+        )
+
+    # --- size: explicit "size M" first, then a standalone size token ---
+    size = None
+    size_match = re.search(r"\bsize\s+([a-zA-Z0-9/]+)\b", working, flags=re.IGNORECASE)
+    if size_match:
+        size = size_match.group(1).upper()
+        working = re.sub(r"\bsize\s+[a-zA-Z0-9/]+\b", " ", working, flags=re.IGNORECASE)
+    else:
+        for token in re.findall(r"\b[a-zA-Z]{1,3}\b", working):
+            if token.lower() in _SIZE_TOKENS:
+                size = token.upper()
+                working = re.sub(rf"\b{token}\b", " ", working, count=1)
+                break
+
+    # --- description: whatever remains, cleaned of filler/punctuation ---
+    description = re.sub(r"\b(in|under|for|the|a|an)\b", " ", working, flags=re.IGNORECASE)
+    description = re.sub(r"[^\w\s/-]", " ", description)        # drop stray punctuation
+    description = re.sub(r"\s+", " ", description).strip()
+
+    return {"description": description, "size": size, "max_price": max_price}
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,9 +163,44 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
+    # Step 1: fresh session — the single source of truth for this interaction.
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: parse the natural-language query into search parameters.
+    parsed = _parse_query(query)
+    session["parsed"] = parsed
+
+    # Step 3: search. This is a pure-Python tool that never raises.
+    results = search_listings(
+        parsed["description"],
+        size=parsed["size"],
+        max_price=parsed["max_price"],
+    )
+    session["search_results"] = results
+
+    # --- ERROR BRANCH: no matches → stop early, do NOT call the styling tools. ---
+    if not results:
+        session["error"] = (
+            f"No listings matched \"{query}\". Try broadening your keywords, "
+            f"raising your max price, or removing the size filter."
+        )
+        return session
+
+    # Step 4: select the top-ranked match. This exact dict flows into both
+    # suggest_outfit and create_fit_card — no re-querying, no hardcoding.
+    session["selected_item"] = results[0]
+
+    # Step 5: style the selected item against the wardrobe (handles empty wardrobe).
+    session["outfit_suggestion"] = suggest_outfit(
+        session["selected_item"], session["wardrobe"]
+    )
+
+    # Step 6: turn the styling suggestion into a shareable caption.
+    session["fit_card"] = create_fit_card(
+        session["outfit_suggestion"], session["selected_item"]
+    )
+
+    # Step 7: done — error stays None on the happy path.
     return session
 
 
