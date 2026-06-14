@@ -1,0 +1,13 @@
+FitFindr — Triggered Failure Modes (Milestone 5)
+=======================================================
+
+[1] search_listings returns zero results (impossible query)
+    $ search_listings("designer ballgown", size="XXS", max_price=5)
+    -> []
+    (empty list, NO exception)
+
+[2] suggest_outfit with an EMPTY wardrobe (falls back to general advice)
+    -> The Y2K Baby Tee in butterfly print is a sweet and playful piece that can add a touch of whimsy to any outfit. It pairs well with flowy silhouettes, such as skirts or wide-leg pants, and can be complemented by soft, pastel colors or neutral tones like beige or denim. This tee is perfect for casual, everyday occasions and can evoke a charming cottagecore vibe, making it ideal for lounging around or running errands. To enhance its Y2K flair, consider pairing it with low-rise jeans or a flowy skirt for a nostalgic and feminine look.
+
+[3] create_fit_card with an EMPTY outfit string (descriptive error string)
+    -> Can't make a fit card — no outfit suggestion was provided.
