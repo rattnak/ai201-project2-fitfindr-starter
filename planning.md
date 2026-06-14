@@ -70,9 +70,46 @@ If `outfit` is empty/whitespace-only, it returns a descriptive error-message str
 
 ---
 
-### Additional Tools (if any)
+### Additional Tools (stretch features)
 
-None for the core build. (Stretch idea: a `parse_query` LLM tool to replace the regex parser in the loop — not implemented.)
+#### Tool 4: estimate_price_fairness (Stretch — Price comparison)
+
+**What it does:** Given a listing, estimates whether its price is fair by comparing it against
+comparable listings in the dataset (same `category`, overlapping `style_tags`). Pure Python — no LLM.
+
+**Input parameters:**
+- `item` (dict): a listing dict (the selected item).
+- `listings` (list[dict] | None): the pool to compare against; defaults to the full dataset via `load_listings()`.
+
+**What it returns:** a dict `{"verdict": str, "item_price": float, "comp_count": int, "comp_avg": float | None, "comp_low": float | None, "comp_high": float | None, "message": str}`.
+`verdict` is one of `"great deal"`, `"fair"`, `"a bit high"`, or `"no comparables"`. `message` is a one-line
+human-readable summary (e.g. *"$24 vs. an avg of $21 for similar graphic tees — fair price."*).
+
+**What happens if it fails or returns nothing:** If there are no comparable listings, it returns
+`verdict="no comparables"` with `comp_count=0` and a message saying it can't judge the price — never raises.
+
+#### Tool 5: get_trending_styles (Stretch — Trend awareness)
+
+**What it does:** Surfaces which style tags are "currently popular" in (optionally) a given size range,
+by aggregating tag frequency across the listings dataset as a stand-in for live platform activity.
+(Mocked: there is no real external platform, so the dataset stands in for "recent posts/tags".) Pure Python.
+
+**Input parameters:**
+- `size` (str | None): optional size filter (same case-insensitive substring match as search).
+- `top_n` (int): how many trending tags to return (default 5).
+
+**What it returns:** a list of `{"tag": str, "count": int}` dicts, most popular first. `[]` if nothing
+matches the size filter.
+
+**What happens if it fails or returns nothing:** Returns `[]` (the loop/UI just omits the trend note) — never raises.
+
+#### Style profile memory (Stretch — persistence, not a tool)
+
+A small persistence layer (`profile.py`) saves/loads a JSON style profile to
+`data/user_profile.json`: the user's wardrobe plus a `preferred_styles` list (learned from the tags of
+items they search/select). `load_profile()` returns the saved wardrobe so a returning user doesn't
+re-enter it; `update_profile_from_session(session)` records the style tags of the selected item.
+Failure modes: a missing/corrupt file returns an empty default profile (never raises).
 
 ---
 
@@ -188,3 +225,41 @@ Write out what a full user interaction looks like from start to finish — tool 
 **Final output to user:** The Gradio UI shows three panels — **Top listing** (title, price, platform, condition, size of the selected tee), **Outfit idea** (the step-3 styling text), and **Your fit card** (the step-4 caption). `session["error"]` is `None`.
 
 **Error-path variant:** For the query *"designer ballgown size XXS under $5"*, step 2 returns `[]`. The loop sets `session["error"] = "No listings matched ... Try broadening your keywords, raising your max price, or removing the size filter."`, returns early, and the UI shows that message in the listing panel with the other two panels empty — `suggest_outfit` and `create_fit_card` are never called.
+
+---
+
+## Stretch Features
+
+All four stretch features are implemented. `planning.md` was updated (above) before building each.
+
+### 1. Price comparison tool (`estimate_price_fairness`)
+Added as Tool 4. After the loop selects an item, it runs this tool and stores the verdict in
+`session["price_check"]`. The UI shows the fairness line under the listing. See Tool 4 spec above.
+
+### 2. Style profile memory (`profile.py`)
+A persistence layer keyed to `data/user_profile.json`. On the UI's "Saved profile" wardrobe option,
+the agent loads the stored wardrobe instead of requiring re-entry; after a successful run it records the
+selected item's style tags into `preferred_styles`. Corrupt/missing files degrade to an empty profile.
+
+### 3. Trend awareness tool (`get_trending_styles`)
+Added as Tool 5. The loop calls it with the parsed size and stores the top tags in
+`session["trending"]`; the UI appends a short "trending in your size" note. Mocked from the dataset
+since there's no live platform to query.
+
+### 4. Retry logic with fallback (in the planning loop)
+This is the key change to the planning loop: when `search_listings` returns `[]`, the agent does **not**
+immediately give up. It retries with progressively loosened constraints and records what it changed in
+`session["adjustments"]`:
+
+1. Original: `search_listings(description, size, max_price)`
+2. If empty → drop the **size** filter and retry.
+3. If still empty → also drop the **price** filter and retry.
+4. If still empty → set `session["error"]` and stop.
+
+On a successful retry the agent tells the user exactly what was relaxed (e.g. *"No exact match for size M
+under $20 — showing results with the size filter removed."*) via `session["adjustments"]`, so the loosening
+is transparent. This makes the loop genuinely adaptive: identical-looking queries take different paths
+depending on what the dataset returns at each step.
+
+### Updated session fields (stretch)
+`price_check` (dict), `trending` (list), `adjustments` (list[str]) are added to the session dict.
