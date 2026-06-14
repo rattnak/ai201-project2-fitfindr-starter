@@ -10,6 +10,10 @@ Tools:
     search_listings(description, size, max_price)  → list[dict]
     suggest_outfit(new_item, wardrobe)              → str
     create_fit_card(outfit, new_item)               → str
+
+Stretch tools:
+    estimate_price_fairness(item, listings=None)    → dict
+    get_trending_styles(size, top_n)                → list[dict]
 """
 
 import os
@@ -270,3 +274,87 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
         f"thrifted this {title} off {platform} for {price_str} and i'm obsessed — "
         f"already planning the next fit around it ✨"
     )
+
+
+# ── Stretch Tool 4: estimate_price_fairness ────────────────────────────────────
+
+def estimate_price_fairness(item: dict, listings: list[dict] | None = None) -> dict:
+    """
+    Estimate whether `item`'s price is fair relative to comparable listings.
+
+    Comparables = listings in the SAME category that share at least one style_tag
+    with `item` (excluding the item itself by id). Pure Python — no LLM.
+
+    Args:
+        item:     A listing dict (the selected item).
+        listings: Pool to compare against. Defaults to the full dataset.
+
+    Returns:
+        A dict:
+            {
+              "verdict":    "great deal" | "fair" | "a bit high" | "no comparables",
+              "item_price": float,
+              "comp_count": int,
+              "comp_avg":   float | None,
+              "comp_low":   float | None,
+              "comp_high":  float | None,
+              "message":    str,   # one-line human-readable summary
+            }
+        Never raises. If there are no comparables, verdict is "no comparables".
+    """
+    if listings is None:
+        listings = load_listings()
+
+    item_price = float(item.get("price", 0.0))
+    item_id = item.get("id")
+    item_tags = set(item.get("style_tags", []))
+    item_category = item.get("category")
+
+    comps = [
+        l for l in listings
+        if l.get("id") != item_id
+        and l.get("category") == item_category
+        and item_tags.intersection(set(l.get("style_tags", [])))
+    ]
+
+    if not comps:
+        return {
+            "verdict": "no comparables",
+            "item_price": item_price,
+            "comp_count": 0,
+            "comp_avg": None,
+            "comp_low": None,
+            "comp_high": None,
+            "message": (
+                f"No comparable listings to judge the ${item_price:.0f} price — "
+                f"can't assess fairness."
+            ),
+        }
+
+    prices = [float(l["price"]) for l in comps]
+    comp_avg = sum(prices) / len(prices)
+    comp_low, comp_high = min(prices), max(prices)
+
+    # Verdict bands relative to the comparable average (±15%).
+    if item_price <= comp_avg * 0.85:
+        verdict = "great deal"
+    elif item_price <= comp_avg * 1.15:
+        verdict = "fair"
+    else:
+        verdict = "a bit high"
+
+    noun = item_category or "items"
+    message = (
+        f"${item_price:.0f} vs. an average of ${comp_avg:.0f} across "
+        f"{len(comps)} similar {noun} (range ${comp_low:.0f}–${comp_high:.0f}) — {verdict}."
+    )
+
+    return {
+        "verdict": verdict,
+        "item_price": item_price,
+        "comp_count": len(comps),
+        "comp_avg": round(comp_avg, 2),
+        "comp_low": comp_low,
+        "comp_high": comp_high,
+        "message": message,
+    }
