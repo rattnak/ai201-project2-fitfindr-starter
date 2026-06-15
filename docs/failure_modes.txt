@@ -1,13 +1,28 @@
-FitFindr — Triggered Failure Modes (Milestone 5)
+FitFindr — Triggered Failure / Edge Modes
 =======================================================
 
+--- REQUIRED TOOLS ---
+
 [1] search_listings returns zero results (impossible query)
-    $ search_listings("designer ballgown", size="XXS", max_price=5)
-    -> []
-    (empty list, NO exception)
+    search_listings("designer ballgown", size="XXS", max_price=5)
+    -> []   (empty list, NO exception)
 
-[2] suggest_outfit with an EMPTY wardrobe (falls back to general advice)
-    -> The Y2K Baby Tee in butterfly print is a sweet and playful piece that can add a touch of whimsy to any outfit. It pairs well with flowy silhouettes, such as skirts or wide-leg pants, and can be complemented by soft, pastel colors or neutral tones like beige or denim. This tee is perfect for casual, everyday occasions and can evoke a charming cottagecore vibe, making it ideal for lounging around or running errands. To enhance its Y2K flair, consider pairing it with low-rise jeans or a flowy skirt for a nostalgic and feminine look.
+[2] suggest_outfit with an EMPTY wardrobe (general advice fallback)
+    -> The Y2K Baby Tee in butterfly print is a sweet and playful piece that can add a touch of whimsy to any outfit. It pairs well with high-waisted silhouettes, such as skirts or pants, and can be dressed up or down depending on the occasion. Fo ...
 
-[3] create_fit_card with an EMPTY outfit string (descriptive error string)
+[3] create_fit_card with an EMPTY outfit string (descriptive error)
     -> Can't make a fit card — no outfit suggestion was provided.
+
+--- STRETCH FEATURES ---
+
+[4] estimate_price_fairness with NO comparable listings
+    -> verdict=no comparables | No comparable listings to judge the $99 price — can't assess fairness.
+
+[5] get_trending_styles with an impossible size filter
+    -> []   (empty list, NO exception)
+
+[6] retry/fallback: size XXS has no leather bomber -> size filter dropped
+    -> found: 90s Leather Bomber — Black | adjustments: ['removed the size filter (no exact match for size XXS)']
+
+[7] profile memory: corrupt profile file -> empty default profile
+    -> {'wardrobe': {'items': []}, 'preferred_styles': []}
