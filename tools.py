@@ -358,3 +358,38 @@ def estimate_price_fairness(item: dict, listings: list[dict] | None = None) -> d
         "comp_high": comp_high,
         "message": message,
     }
+
+
+# ── Stretch Tool 5: get_trending_styles ────────────────────────────────────────
+
+def get_trending_styles(size: str | None = None, top_n: int = 5) -> list[dict]:
+    """
+    Surface the most popular style tags (a stand-in for "what's trending on the
+    platform"), optionally restricted to a size range. Pure Python — no LLM.
+
+    Since there is no live external platform in this project, tag frequency across
+    the listings dataset is used as a proxy for recent platform activity.
+
+    Args:
+        size:  Optional size filter (case-insensitive substring, like search).
+        top_n: How many trending tags to return.
+
+    Returns:
+        A list of {"tag": str, "count": int} dicts, most popular first.
+        Returns [] if nothing matches the size filter. Never raises.
+    """
+    listings = load_listings()
+    size_filter = size.lower().strip() if size else None
+
+    counts: dict[str, int] = {}
+    for listing in listings:
+        if size_filter is not None and size_filter not in listing.get("size", "").lower():
+            continue
+        for tag in listing.get("style_tags", []):
+            counts[tag] = counts.get(tag, 0) + 1
+
+    if not counts:
+        return []
+
+    ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    return [{"tag": tag, "count": count} for tag, count in ranked[:top_n]]
