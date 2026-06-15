@@ -16,6 +16,7 @@ import gradio as gr
 
 from agent import run_agent
 from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
+from profile import get_saved_wardrobe, update_profile_from_session
 
 
 # ── query handler ─────────────────────────────────────────────────────────────
@@ -26,22 +27,15 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
 
     Args:
         user_query:     The text the user typed into the search box.
-        wardrobe_choice: Either "Example wardrobe" or "Empty wardrobe (new user)".
+        wardrobe_choice: "Example wardrobe", "Empty wardrobe (new user)", or
+                         "Saved profile" (stretch: loads the persisted wardrobe).
 
     Returns:
         A tuple of three strings:
             (listing_text, outfit_suggestion, fit_card)
-        Each string maps to one of the three output panels in the UI.
-
-    TODO:
-        1. Guard against an empty query (return early with an error message).
-        2. Select the wardrobe based on wardrobe_choice.
-        3. Call run_agent() with the query and selected wardrobe.
-        4. If session["error"] is set, return the error in the first panel
-           and empty strings for the other two.
-        5. Otherwise, format session["selected_item"] into a readable listing_text
-           string and return it along with session["outfit_suggestion"] and
-           session["fit_card"].
+        Each string maps to one of the three output panels in the UI. The
+        listing panel also surfaces the stretch features (retry adjustments,
+        price-fairness verdict, and trending styles).
     """
     # 1. Guard against an empty query.
     if not user_query or not user_query.strip():
@@ -50,6 +44,12 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
     # 2. Select the wardrobe based on the radio choice.
     if wardrobe_choice == "Empty wardrobe (new user)":
         wardrobe = get_empty_wardrobe()
+    elif wardrobe_choice == "Saved profile":
+        # Stretch: style profile memory — reuse the wardrobe from disk.
+        wardrobe = get_saved_wardrobe()
+        if not wardrobe.get("items"):
+            # Nothing saved yet — fall back to the example wardrobe.
+            wardrobe = get_example_wardrobe()
     else:
         wardrobe = get_example_wardrobe()
 
@@ -60,9 +60,19 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
     if session["error"]:
         return session["error"], "", ""
 
-    # 5. Happy path: format the selected listing and return all three panels.
+    # Stretch: learn from this run and persist the profile for next time.
+    update_profile_from_session(session)
+
+    # 5. Happy path: format the selected listing + stretch info, return 3 panels.
     item = session["selected_item"]
-    listing_text = (
+
+    parts = []
+
+    # Retry/fallback note (only present if constraints were relaxed).
+    if session.get("adjustments"):
+        parts.append("⚠️ Adjusted your search: " + "; ".join(session["adjustments"]) + ".\n")
+
+    parts.append(
         f"{item['title']}\n"
         f"Price:     ${item['price']:.0f}\n"
         f"Platform:  {item['platform']}\n"
@@ -73,6 +83,17 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
         f"Style:     {', '.join(item['style_tags'])}\n\n"
         f"{item['description']}"
     )
+
+    # Stretch: price-fairness verdict.
+    if session.get("price_check"):
+        parts.append("\n💰 Price check: " + session["price_check"]["message"])
+
+    # Stretch: trending styles.
+    if session.get("trending"):
+        tags = ", ".join(t["tag"] for t in session["trending"])
+        parts.append("📈 Trending right now: " + tags)
+
+    listing_text = "\n".join(parts)
     return listing_text, session["outfit_suggestion"], session["fit_card"]
 
 
@@ -102,7 +123,11 @@ Describe what you're looking for — include size and price if you want to filte
                 scale=3,
             )
             wardrobe_choice = gr.Radio(
-                choices=["Example wardrobe", "Empty wardrobe (new user)"],
+                choices=[
+                    "Example wardrobe",
+                    "Empty wardrobe (new user)",
+                    "Saved profile",
+                ],
                 value="Example wardrobe",
                 label="Wardrobe",
                 scale=1,
